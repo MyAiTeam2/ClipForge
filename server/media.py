@@ -77,16 +77,30 @@ def segments_from_words(words):
     if group: out.append(dict(start=group[0]['start'],end=group[-1]['end'],text=' '.join(x['word'] for x in group)))
     return out
 
-def keep_ranges(start,end,words,remove):
-    if not remove: return [(start,end)]
-    # Word timing defines speech intervals. Retain breaths/padding; remove gaps >0.65 s.
-    intervals=[]
-    for w in words:
-        a=max(start,w['start']-.12); b=min(end,w['end']+.18)
-        if b<=a: continue
-        if intervals and a-intervals[-1][1]<.35: intervals[-1]=(intervals[-1][0],max(b,intervals[-1][1]))
-        else: intervals.append((a,b))
-    return intervals or [(start,end)]
+PURE_FILLERS = {'um', 'uh', 'uhh', 'uhm', 'er', 'erm', 'ah', 'ahh', 'hmm', 'mhm'}
+
+def keep_ranges(start, end, words, remove, remove_fillers=False, max_gap=0.35):
+    if not remove and not remove_fillers: return [(start, end)]
+    clip_words = [w for w in words if w.get('end', 0) > start and w.get('start', 0) < end]
+    if not clip_words: return [(start, end)]
+    
+    kept = []
+    for w in clip_words:
+        cleaned = re.sub(r'[^a-z]', '', str(w.get('word', '')).lower())
+        if remove_fillers and cleaned in PURE_FILLERS:
+            continue
+        kept.append(w)
+    if not kept: return [(start, end)]
+
+    intervals = []
+    for w in kept:
+        a = max(start, w['start'] - 0.12); b = min(end, w['end'] + 0.18)
+        if b <= a: continue
+        if intervals and a - intervals[-1][1] < max_gap:
+            intervals[-1] = (intervals[-1][0], max(b, intervals[-1][1]))
+        else:
+            intervals.append((a, b))
+    return intervals or [(start, end)]
 
 def remap(t,ranges):
     elapsed=0
@@ -150,17 +164,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def face_keyframes(source,start,end):
     import cv2
     cap=cv2.VideoCapture(str(source)); detector=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml')
-    out=[]; previous=.5
+    out=[]; current_x=.5; current_y=.5
     try:
-        for t in range(0,math.ceil(end-start),2):
+        t=0.0
+        while t < (end-start):
             check(); cap.set(cv2.CAP_PROP_POS_MSEC,(start+t)*1000); ok,frame=cap.read()
-            if not ok: continue
+            if not ok:
+                t += 1.0; continue
             h,w=frame.shape[:2]; small=cv2.resize(frame,(640,round(h*640/w)))
-            faces=detector.detectMultiScale(cv2.cvtColor(small,cv2.COLOR_BGR2GRAY),1.1,5,minSize=(35,35))
+            faces=detector.detectMultiScale(cv2.cvtColor(small,cv2.COLOR_BGR2GRAY),1.1,4,minSize=(30,30))
             if len(faces):
-                x,y,fw,fh=max(faces,key=lambda f:f[2]*f[3]); target=(x+fw/2)/640
-                previous=target if not out else previous*.4+target*.6
-            out.append(dict(time=float(t),x=round(previous,3),y=.5,zoom=1.0))
+                largest=max(faces,key=lambda f:f[2]*f[3])
+                target_x=(largest[0]+largest[2]/2)/640
+                target_y=(largest[1]+largest[3]/2)/float(small.shape[0])
+                if abs(target_x - current_x) > 0.035:
+                    current_x = current_x * 0.65 + target_x * 0.35
+                if abs(target_y - current_y) > 0.035:
+                    current_y = current_y * 0.65 + target_y * 0.35
+            out.append(dict(time=round(t,2),x=round(current_x,3),y=round(current_y,3),zoom=1.0))
+            t += 1.0
     finally: cap.release()
     return out or [dict(time=0,x=.5,y=.5,zoom=1)]
 
@@ -175,16 +197,19 @@ def expr(points,key,var='t'):
 
 def render(source,meta,clip,words,folder,progress):
     folder.mkdir(parents=True,exist_ok=True)
-    start,end=clip['start'],clip['end']; ranges=keep_ranges(start,end,words,clip['remove_silence'])
+    start,end=clip['start'],clip['end']
+    ranges=keep_ranges(start,end,words,clip['remove_silence'],remove_fillers=clip.get('remove_fillers',True))
     if len(ranges)>100: raise ValueError('Too many silence cuts. Use a shorter clip or disable silence removal.')
     progress('Cutting and tightening pauses',.1)
     # Independent short encodes keep memory bounded even with many jump cuts.
     pieces=[]
     for i,(a,b) in enumerate(ranges):
         check(); part=folder/f'part-{i:03}.mp4'
+        dur=max(0.01, b-a); fade_d=min(0.012, dur/3)
+        afade=f"afade=t=in:ss=0:d={fade_d:.3f},afade=t=out:st={max(0.0, dur-fade_d):.3f}:d={fade_d:.3f}"
         ff('-ss',str(a),'-i',source,'-t',str(b-a),'-map','0:v:0','-map','0:a:0?',
            '-vf','fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2','-c:v','libx264','-preset','veryfast','-crf','18',
-           '-pix_fmt','yuv420p','-c:a','aac','-ar','48000',part)
+           '-pix_fmt','yuv420p','-af',afade,'-c:a','aac','-ar','48000',part)
         pieces.append(part)
     listing=folder/'concat.txt'; listing.write_text('\n'.join(f"file '{p.name}'" for p in pieces), encoding='utf-8')
     cut=folder/'cut.mp4'; ff('-f','concat','-safe','1','-i',listing,'-c','copy',cut)
@@ -204,6 +229,13 @@ def render(source,meta,clip,words,folder,progress):
     filters=f"crop=w='{cropw}':h='{croph}':x='max(0,min(iw-ow,iw*({cx})-ow/2))':y='max(0,min(ih-oh,ih*({cy})-oh/2))',scale={width}:{height}:flags=lanczos,setsar=1"
     if clip['framing']=='fit':
         filters=f"split[bg][fg];[bg]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},boxblur=30:3[back];[fg]scale={width}:{height}:force_original_aspect_ratio=decrease[front];[back][front]overlay=(W-w)/2:(H-h)/2,setsar=1"
+    elif clip['framing']=='split' and clip['aspect']=='vertical':
+        half_h=height//2
+        cropw_s=f'trunc(min(iw,ih*{width}/{half_h})/2)*2'; croph_s=f'trunc(min(ih,iw/({width}/{half_h}))/2)*2'
+        filters=(f"split[s_top][s_bot];"
+                 f"[s_top]crop=w='{cropw_s}':h='{croph_s}':x='max(0,iw*0.25-ow/2)':y='max(0,ih*0.5-oh/2)',scale={width}:{half_h}:flags=lanczos,setsar=1[top_v];"
+                 f"[s_bot]crop=w='{cropw_s}':h='{croph_s}':x='min(iw-ow,iw*0.75-ow/2)':y='max(0,ih*0.5-oh/2)',scale={width}:{half_h}:flags=lanczos,setsar=1[bot_v];"
+                 f"[top_v][bot_v]vstack=inputs=2,setsar=1")
     else:
         filters+=f",zoompan=z='{zoom}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s={width}x{height}:fps=30"
     timed=retime_words(words,ranges); ass=folder/'captions.ass'; subtitles(timed,ass,width,height,clip.get('caption_style','pop'),clip.get('caption_font','Arial'),clip.get('caption_color','#FFFFFF'),clip.get('caption_highlight','#C8ED48'))

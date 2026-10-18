@@ -9,7 +9,7 @@ build:
     - curl
     - xz-utils
   python_packages:
-    - yt-dlp[default]==2026.8.19
+    - yt-dlp[default]==2025.10.14
     - faster-whisper==1.1.0
     - opencv-python-headless==4.11.0.86
     - imageio-ffmpeg==0.6.0

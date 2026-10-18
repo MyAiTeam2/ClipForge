@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import copy,json,math,os,re,shutil,socket,ipaddress,threading,time,uuid,zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Literal
+from typing import Literal,Optional
 from fastapi import FastAPI,HTTPException,UploadFile,File,Request,Form
 from fastapi.responses import FileResponse,JSONResponse,Response
 from fastapi.staticfiles import StaticFiles
@@ -137,14 +139,14 @@ def validate_url(url):
 
 class ImportRequest(BaseModel):
     url:str=Field(max_length=4096)
-    folder_id:str|None=None
+    folder_id:Optional[str]=None
 class CollectionEdit(BaseModel):
     name:str=Field(min_length=1,max_length=120)
     instructions:str=Field(default='',max_length=6000)
     channel_url:str=Field(default='',max_length=500)
 class VideoEdit(BaseModel):
-    title:str|None=Field(default=None,min_length=1,max_length=200)
-    folder_id:str|None=None
+    title:Optional[str]=Field(default=None,min_length=1,max_length=200)
+    folder_id:Optional[str]=None
 
 class CreatorProfile(BaseModel):
     name:str=Field(default='',max_length=120)
@@ -156,20 +158,20 @@ class CreatorProfile(BaseModel):
     avoid:str=Field(default='',max_length=1000)
 
 class Settings(BaseModel):
-    profile:CreatorProfile|None=None
-    key:str|None=Field(default=None,max_length=512)
+    profile:Optional[CreatorProfile]=None
+    key:Optional[str]=Field(default=None,max_length=512)
     model:str=Field(default='google/gemini-2.5-flash',max_length=120)
     stt_model:str=Field(default='openai/whisper-1',max_length=120)
-    ghl_token:str|None=Field(default=None,max_length=4096)
-    ghl_location:str|None=Field(default=None,max_length=80)
-    ghl_user:str|None=Field(default=None,max_length=80)
-    ghl_accounts:list[str]|None=None
-    caption_font:str|None=Field(default=None,max_length=40)
-    caption_color:str|None=Field(default=None,max_length=7)
-    caption_highlight:str|None=Field(default=None,max_length=7)
-    caption_style:Literal['pop','clean']|None=None
-    site_url:str|None=Field(default=None,max_length=200)
-    course_url:str|None=Field(default=None,max_length=200)
+    ghl_token:Optional[str]=Field(default=None,max_length=4096)
+    ghl_location:Optional[str]=Field(default=None,max_length=80)
+    ghl_user:Optional[str]=Field(default=None,max_length=80)
+    ghl_accounts:Optional[list[str]]=None
+    caption_font:Optional[str]=Field(default=None,max_length=40)
+    caption_color:Optional[str]=Field(default=None,max_length=7)
+    caption_highlight:Optional[str]=Field(default=None,max_length=7)
+    caption_style:Optional[Literal['pop','clean']]=None
+    site_url:Optional[str]=Field(default=None,max_length=200)
+    course_url:Optional[str]=Field(default=None,max_length=200)
 class GhlPost(BaseModel):
     account_ids:list[str]=Field(min_length=1,max_length=20)
     summary:str=Field(default='',max_length=5000)
@@ -186,7 +188,7 @@ class QuickCopy(BaseModel):
     follow_up:str=Field(default='',max_length=1200)
 
 class GhlQuick(BaseModel):
-    posts:list[QuickCopy]|None=Field(default=None,max_length=20)
+    posts:Optional[list[QuickCopy]]=Field(default=None,max_length=20)
     clip_ids:list[str]=Field(min_length=1,max_length=20)
     account_ids:list[str]=Field(min_length=1,max_length=20)
     follow_up:str=Field(default='',max_length=1200)
@@ -205,18 +207,18 @@ class GhlQuick(BaseModel):
         return self
 class Analyze(BaseModel):
     transcription:Literal['local','openrouter']='local'
-    selection:Literal['local','openrouter']='local'
+    selection:Literal['local','openrouter','ollama']='local'
     local_model:Literal['tiny.en','small','medium']='small'
     count:int=Field(default=4,ge=1,le=12)
     length:int=Field(default=45,ge=10,le=180)
     brief:str=Field(default='',max_length=2000)
     auto_export:bool=True
-    window_start:float|None=Field(default=None,ge=0,allow_inf_nan=False)
-    window_end:float|None=Field(default=None,gt=0,allow_inf_nan=False)
-    caption_style:Literal['pop','clean']|None=None
-    caption_font:str|None=Field(default=None,max_length=40)
-    caption_color:str|None=Field(default=None,max_length=7)
-    caption_highlight:str|None=Field(default=None,max_length=7)
+    window_start:Optional[float]=Field(default=None,ge=0,allow_inf_nan=False)
+    window_end:Optional[float]=Field(default=None,gt=0,allow_inf_nan=False)
+    caption_style:Optional[Literal['pop','clean']]=None
+    caption_font:Optional[str]=Field(default=None,max_length=40)
+    caption_color:Optional[str]=Field(default=None,max_length=7)
+    caption_highlight:Optional[str]=Field(default=None,max_length=7)
 class Keyframe(BaseModel):
     time:float=Field(ge=0,le=600,allow_inf_nan=False)
     x:float=Field(default=.5,ge=0,le=1,allow_inf_nan=False)
@@ -228,7 +230,7 @@ class Clip(BaseModel):
     start:float=Field(ge=0,allow_inf_nan=False)
     end:float=Field(gt=0,allow_inf_nan=False)
     aspect:Literal['vertical','square','landscape']='vertical'
-    framing:Literal['face','center','fit']='face'
+    framing:Literal['face','center','fit','split']='face'
     focus_x:float=Field(default=.5,ge=0,le=1,allow_inf_nan=False)
     captions:bool=True
     caption_style:Literal['pop','clean']='pop'
@@ -236,6 +238,7 @@ class Clip(BaseModel):
     caption_color:str=Field(default='#FFFFFF',max_length=7)
     caption_highlight:str=Field(default='#C8ED48',max_length=7)
     remove_silence:bool=False
+    remove_fillers:bool=True
     auto_zoom:bool=True
     resolution:Literal[720,1080]=1080
     keyframes:list[Keyframe]=Field(default_factory=list,max_length=80)
@@ -399,7 +402,7 @@ def import_url(body:ImportRequest):
         dest=DATA/p['id']; progress('Downloading source video',.05)
         # Isolated config; never harvest browser cookies or credentials.
         output=media.run([sys.executable,'-m','yt_dlp','--ignore-config','--no-playlist','--no-cache-dir',
-                         '--js-runtimes','node','--ffmpeg-location',media.FFMPEG,'--max-filesize','8G',
+                         '--ffmpeg-location',media.FFMPEG,'--max-filesize','8G',
                          '--match-filter','duration <= 14400 & !is_live',
                          '-f','bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]/b[vcodec^=avc1][height<=1080]/bv*[height<=1080]+ba/b[height<=1080]/best','--merge-output-format','mp4',
                          '--write-info-json','--no-warnings','-o',str(dest/'download.%(ext)s'),body.url])
@@ -410,7 +413,7 @@ def import_url(body:ImportRequest):
     return dict(project=p,job=queue(p['id'],'import',work))
 
 @app.post('/api/import/upload')
-async def upload(file:UploadFile=File(...),folder_id:str|None=Form(default=None)):
+async def upload(file:UploadFile=File(...),folder_id:Optional[str]=Form(default=None)):
     p=create((file.filename or 'Uploaded video')[:200],folder_id); target=DATA/p['id']/'upload.bin'; size=0
     try:
         with target.open('wb') as f:
@@ -443,7 +446,7 @@ def analyze(pid:str,body:Analyze):
             p['transcript']=ai.transcribe(DATA/pid/'source.mp4',DATA/pid,p['meta']['duration'],body.transcription,progress,body.local_model); write(p)
         instructions=project_profile(p).get('folder_instructions','')
         brief='\n\n'.join(x for x in [instructions,body.brief] if x)
-        candidates=ai.suggest(p['transcript'],p['meta']['duration'],body.count,body.length,body.selection,brief,progress,window)
+        candidates=ai.suggest(p['transcript'],p['meta']['duration'],body.count,body.length,body.selection,brief,progress,window,folder=DATA/pid)
         fresh=[]
         for x in candidates:
             c=Clip(**{**x,**style}).model_dump(); c.update(id=uid(),score=x['score'],reason=x['reason'],selection=body.selection,dirty=True)

@@ -8,6 +8,7 @@ __pycache__/
 .env.*
 .DS_Store
 dist/
+*.app/
 cloud/php/private/*
 !cloud/php/private/.gitkeep
 cloud/model/.cog/
